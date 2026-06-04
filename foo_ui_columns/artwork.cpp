@@ -403,6 +403,14 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WINDOWPOSCHANGED: {
         const auto lpwp = reinterpret_cast<LPWINDOWPOS>(lp);
 
+        const auto wnd_is_visible = IsWindowVisible(wnd) && !IsIconic(GetAncestor(wnd, GA_ROOT));
+
+        if (wnd_is_visible && m_dynamic_artwork_pending) {
+            m_dynamic_artwork_pending = false;
+            refresh_image();
+            break;
+        }
+
         if (lpwp->flags & SWP_NOSIZE)
             break;
 
@@ -412,6 +420,14 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         invalidate_window();
         break;
     }
+    case WM_SHOWWINDOW: {
+        
+        if (wp && m_dynamic_artwork_pending) {
+           m_dynamic_artwork_pending = false;
+           refresh_image();
+        }
+        break;
+    }   
     case WM_LBUTTONDOWN: {
         switch (static_cast<ClickAction>(click_action.get())) {
         case ClickAction::open_image_viewer:
