@@ -293,14 +293,15 @@ void ArtworkPanel::on_album_art(album_art_data::ptr data) noexcept
 
     if (get_displayed_artwork_type_index() != 0)
         return;
+    
     const auto wnd = get_wnd();
+    const auto root = wnd ? GetAncestor(wnd, GA_ROOT) : nullptr;
 
     // When foobar2000 is minimised to tray, the Artwork view is not visible.
     // Do not refresh/decode/render artwork while hidden; defer it until visible again.
-    if (!wnd || !IsWindowVisible(wnd) || IsIconic(GetAncestor(wnd, GA_ROOT))) {
+    if (!wnd || !IsWindowVisible(wnd) || (root && IsIconic(root))) {
         m_dynamic_artwork_pending = true;
         reset_effects();
-        m_artwork_decoder.abort();
         return;
     }
         refresh_image();
@@ -403,13 +404,8 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WINDOWPOSCHANGED: {
         const auto lpwp = reinterpret_cast<LPWINDOWPOS>(lp);
 
-        const auto wnd_is_visible = IsWindowVisible(wnd) && !IsIconic(GetAncestor(wnd, GA_ROOT));
-
-        if (wnd_is_visible && m_dynamic_artwork_pending) {
-            m_dynamic_artwork_pending = false;
-            refresh_image();
-            break;
-        }
+        if (!(lpwp->flags & SWP_HIDEWINDOW) && m_dynamic_artwork_pending)
+            PostMessage(wnd, MSG_REFRESH_IMAGE, 0, 0);
 
         if (lpwp->flags & SWP_NOSIZE)
             break;
@@ -422,10 +418,8 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_SHOWWINDOW: {
         
-        if (wp && m_dynamic_artwork_pending) {
-           m_dynamic_artwork_pending = false;
-           refresh_image();
-        }
+        if (wp && m_dynamic_artwork_pending) 
+            PostMessage(wnd, MSG_REFRESH_IMAGE, 0, 0);
         break;
     }   
     case WM_LBUTTONDOWN: {
@@ -450,6 +444,10 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         RedrawWindow(wnd, nullptr, nullptr, RDW_INVALIDATE);
         return 0;
     case MSG_REFRESH_IMAGE:
+        if (m_dynamic_artwork_pending) {
+           resume_deferred_artwork();
+           return 0;
+        }
         refresh_image();
         return 0;
     case WM_TIMER:
@@ -547,6 +545,7 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             const auto hr = THROW_IF_FAILED(m_dxgi_swap_chain->Present(1, 0));
 
             if (hr == DXGI_STATUS_OCCLUDED) {
+                m_dynamic_artwork_pending = true;
                 register_occlusion_event();
                 reset_effects();
                // m_artwork_decoder.abort();
@@ -730,6 +729,37 @@ void ArtworkPanel::update_swap_chain_buffers_size() const
 
     m_d2d_device_context->SetTarget(nullptr);
     THROW_IF_FAILED(m_dxgi_swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0));
+}
+
+bool ArtworkPanel::is_rendering_suspended() const
+{
+    const auto wnd = get_wnd();
+
+    if (!wnd || !IsWindowVisible(wnd))
+        return true;
+
+    const auto root = GetAncestor(wnd, GA_ROOT);
+
+    return root && IsIconic(root);
+}
+
+void ArtworkPanel::resume_deferred_artwork()
+{
+    if (!m_dynamic_artwork_pending)
+        return;
+
+    if (is_rendering_suspended())
+        return;
+
+    m_dynamic_artwork_pending = false;
+
+    reset_effects();
+
+    // 关键：不要只 refresh_image()。
+    // 这里需要重新向 ArtworkReader 请求当前 track 的 artwork。
+    force_reload_artwork();
+
+    invalidate_window();
 }
 
 void ArtworkPanel::create_d2d_device_resources()
