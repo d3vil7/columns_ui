@@ -291,7 +291,18 @@ void ArtworkPanel::on_album_art(album_art_data::ptr data) noexcept
     if (m_selected_artwork_type_index == 0 && data.is_valid())
         m_artwork_type_override_index.reset();
 
-    if (get_displayed_artwork_type_index() == 0)
+    if (get_displayed_artwork_type_index() != 0)
+        return;
+    const auto wnd = get_wnd();
+
+    // When foobar2000 is minimised to tray, the Artwork view is not visible.
+    // Do not refresh/decode/render artwork while hidden; defer it until visible again.
+    if (!wnd || !IsWindowVisible(wnd) || IsIconic(GetAncestor(wnd, GA_ROOT))) {
+        m_dynamic_artwork_pending = true;
+        reset_effects();
+        m_artwork_decoder.abort();
+        return;
+    }
         refresh_image();
 }
 
@@ -464,6 +475,10 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
     case WM_PAINT: {
+        if (!IsWindowVisible(wnd) || IsIconic(GetAncestor(wnd, GA_ROOT))) {
+        ValidateRect(wnd, nullptr);
+        return 0;
+    }
         const auto background_colour = colours::helper(g_guid_colour_client).get_colour(colours::colour_background);
 
         try {
