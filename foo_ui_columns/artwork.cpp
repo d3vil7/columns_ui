@@ -291,19 +291,7 @@ void ArtworkPanel::on_album_art(album_art_data::ptr data) noexcept
     if (m_selected_artwork_type_index == 0 && data.is_valid())
         m_artwork_type_override_index.reset();
 
-    if (get_displayed_artwork_type_index() != 0)
-        return;
-    
-    const auto wnd = get_wnd();
-    const auto root = wnd ? GetAncestor(wnd, GA_ROOT) : nullptr;
-
-    // When foobar2000 is minimised to tray, the Artwork view is not visible.
-    // Do not refresh/decode/render artwork while hidden; defer it until visible again.
-    if (!wnd || !IsWindowVisible(wnd) || (root && IsIconic(root))) {
-        m_dynamic_artwork_pending = true;
-        reset_effects();
-        return;
-    }
+    if (get_displayed_artwork_type_index() == 0)
         refresh_image();
 }
 
@@ -402,15 +390,7 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_ERASEBKGND:
         return FALSE;
     case WM_WINDOWPOSCHANGED: {
-        if (m_dynamic_artwork_pending) {
-         PostMessage(get_wnd(), MSG_REFRESH_IMAGE, 0, 0); // 延迟触发
-        }
-        break;     
-        
         const auto lpwp = reinterpret_cast<LPWINDOWPOS>(lp);
-
-        if (!(lpwp->flags & SWP_HIDEWINDOW) && m_dynamic_artwork_pending)
-            PostMessage(wnd, MSG_REFRESH_IMAGE, 0, 0);
 
         if (lpwp->flags & SWP_NOSIZE)
             break;
@@ -421,12 +401,6 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         invalidate_window();
         break;
     }
-    case WM_SHOWWINDOW: {
-        
-        if (wp && m_dynamic_artwork_pending) 
-            PostMessage(wnd, MSG_REFRESH_IMAGE, 0, 0);
-        break;
-    }   
     case WM_LBUTTONDOWN: {
         switch (static_cast<ClickAction>(click_action.get())) {
         case ClickAction::open_image_viewer:
@@ -449,14 +423,6 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         RedrawWindow(wnd, nullptr, nullptr, RDW_INVALIDATE);
         return 0;
     case MSG_REFRESH_IMAGE:
-        if (m_dynamic_artwork_pending) {
-          m_dynamic_artwork_pending = false;
-          reset_effects();
-          force_reload_artwork();
-          invalidate_window();
-          return 0;
-        }
-        
         refresh_image();
         return 0;
     case WM_TIMER:
@@ -468,9 +434,10 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!m_is_occlusion_status_timer_active && !m_occlusion_status_event_cookie)
             return 0;
 
-        if (!m_dxgi_swap_chain || m_dxgi_swap_chain->Present(0, DXGI_PRESENT_TEST) != DXGI_STATUS_OCCLUDED)
+        if (!m_dxgi_swap_chain || m_dxgi_swap_chain->Present(0, DXGI_PRESENT_TEST) != DXGI_STATUS_OCCLUDED) {
+            m_artwork_decode_pending = true;
             invalidate_window();
-
+        }
         return 0;
     case WM_POWERBROADCAST: {
         if (wp != PBT_POWERSETTINGCHANGE)
@@ -498,10 +465,18 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
     case WM_PAINT: {
-        if (!IsWindowVisible(wnd) || IsIconic(GetAncestor(wnd, GA_ROOT))) {
-        ValidateRect(wnd, nullptr);
-        return 0;
-    }
+        if (is_rendering_suspended()) {
+           ValidateRect(wnd, nullptr);
+           return 0;
+        }
+
+        if (m_artwork_decode_pending) {
+           m_artwork_decode_pending = false;
+           PostMessage(wnd, MSG_REFRESH_IMAGE, 0, 0);
+           ValidateRect(wnd, nullptr);
+           return 0;
+        }
+        
         const auto background_colour = colours::helper(g_guid_colour_client).get_colour(colours::colour_background);
 
         try {
@@ -554,10 +529,9 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             const auto hr = THROW_IF_FAILED(m_dxgi_swap_chain->Present(1, 0));
 
             if (hr == DXGI_STATUS_OCCLUDED) {
-                m_dynamic_artwork_pending = true;
                 register_occlusion_event();
                 reset_effects();
-               // m_artwork_decoder.abort();
+                m_artwork_decode_pending = true;
             } else {
                 deregister_occlusion_event();
             }
@@ -738,38 +712,6 @@ void ArtworkPanel::update_swap_chain_buffers_size() const
 
     m_d2d_device_context->SetTarget(nullptr);
     THROW_IF_FAILED(m_dxgi_swap_chain->ResizeBuffers(0, 0, 0, DXGI_FORMAT_UNKNOWN, 0));
-}
-
-bool ArtworkPanel::is_rendering_suspended() const
-{
-    const auto wnd = get_wnd();
-
-    if (!wnd || !IsWindowVisible(wnd))
-        return true;
-
-    const auto root = GetAncestor(wnd, GA_ROOT);
-
-    return root && IsIconic(root);
-}
-
-void ArtworkPanel::resume_deferred_artwork()
-{
-    if (!m_dynamic_artwork_pending)
-        return;
-
-    if (is_rendering_suspended())
-        return;
-
-    m_dynamic_artwork_pending = false;
-
-    reset_effects();
-
-    // 关键：不要只 refresh_image()。
-    // 这里需要重新向 ArtworkReader 请求当前 track 的 artwork。
-
-    force_reload_artwork();
-
-    invalidate_window();
 }
 
 void ArtworkPanel::create_d2d_device_resources()
@@ -1098,6 +1040,7 @@ void ArtworkPanel::force_reload_artwork()
     }
 
     if (handle.is_valid()) {
+        m_artwork_decode_pending = false;
         reset_effects();
         m_artwork_decoder.reset();
         request_artwork(handle, is_from_playback);
@@ -1424,6 +1367,25 @@ void ArtworkPanel::on_artwork_loaded(bool artwork_changed)
     refresh_image();
 }
 
+bool ArtworkPanel::is_rendering_suspended() const
+{
+    const auto wnd = get_wnd();
+
+    if (!wnd || !IsWindowVisible(wnd))
+        return true;
+
+    const auto root = GetAncestor(wnd, GA_ROOT);
+
+    if (root && IsIconic(root))
+        return true;
+
+    RECT rc{};
+    if (!GetClientRect(wnd, &rc))
+        return true;
+
+    return rc.right <= rc.left || rc.bottom <= rc.top;
+}
+
 void ArtworkPanel::refresh_image()
 {
     TRACK_CALL_TEXT("cui::ArtworkPanel::refresh_image");
@@ -1441,11 +1403,24 @@ void ArtworkPanel::refresh_image()
     reset_effects();
 
     if (!data.is_valid()) {
+        m_artwork_decode_pending = false;
         m_artwork_decoder.reset();
         invalidate_window();
         return;
     }
-
+    
+    if (is_rendering_suspended()) {
+        // Important:
+        // Keep ArtworkReader state, but do not create D2D/DXGI resources
+        // and do not decode into a D2D bitmap while the window is hidden/occluded.
+        m_artwork_decode_pending = true;
+        m_artwork_decoder.reset();
+        invalidate_window();
+        return;
+    }
+    
+    m_artwork_decode_pending = false;
+    
     try {
         create_d2d_device_resources();
     }
@@ -1457,6 +1432,7 @@ void ArtworkPanel::refresh_image()
 void ArtworkPanel::clear_image()
 {
     m_current_track.reset();
+    m_artwork_decode_pending = false;
 
     reset_effects();
     m_artwork_decoder.reset();
@@ -1522,7 +1498,18 @@ void ArtworkPanel::queue_decode(const album_art_data::ptr& data)
 
     const auto monitor = is_advanced_colour_active() ? nullptr : MonitorFromWindow(get_wnd(), MONITOR_DEFAULTTONEAREST);
 
-    m_artwork_decoder.decode(m_d2d_device_context, is_advanced_colour_active(), monitor, data, [this, self{ptr{this}}] {
+    m_artwork_decoder.decode(
+    m_d2d_device_context,
+    is_advanced_colour_active(),
+    monitor,
+    data,
+    [this, self{ptr{this}}] {
+        if (is_rendering_suspended()) {
+            m_artwork_decode_pending = true;
+            reset_effects();
+            return;
+        }
+
         if (uih::d2d::is_device_reset_error(m_artwork_decoder.get_error_result())) {
             reset_d2d_device_resources();
             PostMessage(get_wnd(), MSG_REFRESH_IMAGE, 0, 0);
