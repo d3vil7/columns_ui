@@ -57,7 +57,10 @@ jobs:
 
       - name: Build release package
         shell: pwsh
+        env:
+          FB2K_SYMBOL_STORE: ${{ github.workspace }}\symbol-store
         run: |
+          New-Item -ItemType Directory -Force -Path $env:FB2K_SYMBOL_STORE | Out-Null
           py scripts\build-release-package.py
 
       - name: List release package output
