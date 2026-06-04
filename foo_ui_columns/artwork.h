@@ -148,6 +148,8 @@ private:
 
     void update_dxgi_output_desc();
     void update_swap_chain_buffers_size() const;
+    bool is_rendering_suspended() const;
+    void resume_deferred_artwork();
     void create_d2d_device_resources();
     void reset_d2d_device_resources(bool keep_devices = false);
     void register_occlusion_event();
