@@ -449,8 +449,15 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         RedrawWindow(wnd, nullptr, nullptr, RDW_INVALIDATE);
         return 0;
     case MSG_REFRESH_IMAGE:
-        resume_deferred_artwork();
-        // refresh_image();
+        if (m_dynamic_artwork_pending) {
+          m_dynamic_artwork_pending = false;
+          reset_effects();
+          force_reload_artwork();
+          invalidate_window();
+          return 0;
+        }
+        
+        refresh_image();
         return 0;
     case WM_TIMER:
         if (wp != TIMER_OCCLUSION_STATUS)
@@ -760,15 +767,7 @@ void ArtworkPanel::resume_deferred_artwork()
     // 关键：不要只 refresh_image()。
     // 这里需要重新向 ArtworkReader 请求当前 track 的 artwork。
 
-    if (m_playing_track.is_valid() && m_artwork_reader) {
-        // 获取前面显示的 artwork 类型列表
-        std::vector<t_size> types_to_request;
-        types_to_request.push_back(get_displayed_artwork_type_index()); // 通常 front cover
-
-        for (auto type : types_to_request) {
-            m_artwork_reader->request_artwork(m_playing_track, type);
-        }
-    }
+    force_reload_artwork();
 
     invalidate_window();
 }
