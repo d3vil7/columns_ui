@@ -546,10 +546,13 @@ LRESULT ArtworkPanel::on_message(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 
             const auto hr = THROW_IF_FAILED(m_dxgi_swap_chain->Present(1, 0));
 
-            if (hr == DXGI_STATUS_OCCLUDED)
+            if (hr == DXGI_STATUS_OCCLUDED) {
                 register_occlusion_event();
-            else
+                reset_effects();
+               // m_artwork_decoder.abort();
+            } else {
                 deregister_occlusion_event();
+            }
         } catch (...) {
             if (uih::d2d::is_device_reset_error(wil::ResultFromCaughtException())) {
                 reset_d2d_device_resources();
