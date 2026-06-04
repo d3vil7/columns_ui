@@ -1,50 +1,38 @@
-name: VS 2026
+name: Build and release
 
 on:
   workflow_dispatch:
-  pull_request:
-  schedule:
-    - cron: 0 4 * * WED
-  push:
-    branches:
-      - main
+    inputs:
+      tag:
+        description: "Release tag to create, e.g. v3.5.0-artwork-fix.1"
+        required: true
+        type: string
+      release_name:
+        description: "Release name. Leave empty to use the tag."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark this GitHub Release as a pre-release"
+        required: true
+        default: true
+        type: boolean
+      draft:
+        description: "Create as draft release"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
 
 jobs:
-  build:
-    name: build (${{ matrix.run-code-analysis && format('{0}, code analysis', matrix.platform) || format('{0}, {1}, {2}', matrix.platform, matrix.toolset, matrix.configuration) }})
+  build-release:
+    name: Build universal release package
     runs-on: windows-2025-vs2026
-    continue-on-error: ${{ matrix.allowed-failure == true }}
-
-    strategy:
-      matrix:
-        toolset: ["v145", "clang"]
-        platform: ["win32", "x64"]
-        configuration: ["release", "debug"]
-        run-code-analysis: [false]
-        include:
-          - toolset: v145
-            configuration: release
-            enable-annotations: true
-            publish-artefacts: true
-          - toolset: v145
-            configuration: release
-            platform: x64
-            enable-annotations: true
-            publish-artefacts: true
-          - toolset: clang
-            additional-build-args: '"/p:PlatformToolset=ClangCL;LinkToolExe=link.exe;VcpkgAutoLink=true"'
-            allowed-failure: true
-        exclude:
-          - toolset: v145
-            configuration: debug
-            platform: win32
-          - toolset: clang
-            configuration: debug
-          - toolset: clang
-            platform: win32
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Check out source
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: true
@@ -52,42 +40,45 @@ jobs:
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v3
 
-      - name: Cache dependencies
+      - name: Cache vcpkg binary packages
         uses: actions/cache@v5
         with:
           path: C:\Users\runneradmin\AppData\Local\vcpkg\archives
-          key: ${{ runner.os }}-vcpkg-archives-${{ hashFiles('vcpkg.json') }}
+          key: ${{ runner.os }}-vcpkg-archives-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            ${{ runner.os }}-vcpkg-archives-
 
       - name: Set up vcpkg
+        shell: pwsh
         run: |
           git -C C:\vcpkg pull
           vcpkg version
           vcpkg integrate install
 
-      - name: Set up MSBuild logger
-        if: matrix.enable-annotations
+      - name: Build release package
+        shell: pwsh
         run: |
-          Invoke-WebRequest -Uri https://github.com/reupen/msbuild-github-logger/releases/download/v1.0.1/Reupen.MSBuild.GitHubLogger.dll -OutFile "$Env:Temp\Reupen.MSBuild.GitHubLogger.dll"
+          py scripts\build-release-package.py
 
-      - name: Build
+      - name: List release package output
+        shell: pwsh
         run: |
-          msbuild `
-            /m `
-            '/p:Platform=${{ matrix.platform }}' `
-            '/p:Configuration=${{ matrix.configuration }}' `
-            '/p:RunCodeAnalysis=${{ matrix.run-code-analysis }}' `
-            ${{ matrix.additional-build-args }} `
-            ${{ matrix.enable-annotations && '"/logger:$Env:Temp\Reupen.MSBuild.GitHubLogger.dll"' }} `
-            vc18\columns_ui-public.sln
+          Get-ChildItem -Recurse component-packages | Format-Table -AutoSize
 
-      - uses: actions/upload-artifact@v7
-        if: matrix.publish-artefacts
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
         with:
-          path: vc18\release-*\foo_ui_columns*.fb2k-component
-          archive: false
+          name: columns-ui-release-package
+          path: component-packages/*
+          if-no-files-found: error
 
-      - uses: actions/upload-artifact@v7
-        if: matrix.publish-artefacts
+      - name: Create GitHub Release and upload package
+        uses: softprops/action-gh-release@v2
         with:
-          name: Symbols for debugging (${{ matrix.configuration }}, ${{ matrix.platform }})
-          path: vc18\release-*\foo_ui_columns.pdb
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.release_name || inputs.tag }}
+          target_commitish: ${{ github.sha }}
+          draft: ${{ inputs.draft }}
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: component-packages/*
